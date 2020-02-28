@@ -1,0 +1,2 @@
+Make sure you switch to the GNU compiler with OpenMPI before compiling or
+running MPI jobs.  You can do this by running `source modules.sh`.
