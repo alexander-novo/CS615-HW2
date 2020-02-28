@@ -1,0 +1,10 @@
+imulation time = 0.083813 seconds
+n = 1000, simulation time = 0.187378 seconds
+n = 2000, simulation time = 0.379334 seconds
+n = 4000, simulation time = 0.817804 seconds
+n = 8000, simulation time = 1.78823 seconds
+
+Serial code is O(N^slope)
+Slope estimates are : 1.160706 1.017517 1.108286 1.128705
+Slope estimate for line fit is: 1.095623
+Serial Grade =  100.00

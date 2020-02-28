@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
 	set_size(n);
 	init_particles(n, particles);
 
-	unsigned numGrids  = size / cutoff / 3;
+	unsigned numGrids  = size / cutoff / 4;
 	double gridSize    = size / numGrids;
 	container *buckets = new container[numGrids * numGrids];
 
