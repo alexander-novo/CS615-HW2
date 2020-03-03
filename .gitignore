@@ -2,3 +2,9 @@
 
 *.o
 *.txt
+
+serial
+openmp
+pthreads
+mpi
+autograder
