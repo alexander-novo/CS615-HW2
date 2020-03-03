@@ -7,14 +7,14 @@ SHELL='bash'
 # With with `modules.sh`
 #
 
-CC = g++-9
+CC = g++
 MPCC = mpic++
-OPENMP = -fopenmp
-CFLAGS = -Ofast
+#OPENMP = -fopenmp
+CFLAGS = -O3 -std=c++11
 LIBS =
 
 
-TARGETS = serial pthreads openmp mpi autograder
+TARGETS = mpi serial autograder #  pthreads openmp 
 
 all:	$(TARGETS)
 
