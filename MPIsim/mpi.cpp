@@ -8,6 +8,7 @@
 
 extern double size;
 #define cutoff 0.01
+#define NUM_PARTICLES_PER_BUCKET 1.0
 
 typedef std::list<particle_t *> container;
 
@@ -15,6 +16,42 @@ struct ExtraParticleInfo {
 	struct {
 		unsigned i, j;
 	} bin;
+
+	ExtraParticleInfo() {}
+
+	ExtraParticleInfo(unsigned i, unsigned j) {
+		bin.i = i;
+		bin.j = j;
+	}
+};
+
+struct PackedParticle {
+	struct {
+		double x, y;
+	} position;
+
+	struct {
+		double x, y;
+	} velocity;
+
+	PackedParticle(particle_t &p) {
+		position.x = p.x;
+		position.y = p.y;
+		velocity.x = p.vx;
+		velocity.y = p.vy;
+	}
+
+	PackedParticle() {}
+
+	operator particle_t() const {
+		particle_t re;
+		re.x  = position.x;
+		re.y  = position.y;
+		re.vx = velocity.x;
+		re.vy = velocity.y;
+
+		return re;
+	}
 };
 
 //
@@ -51,9 +88,12 @@ int main(int argc, char **argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-	unsigned procHeight =
-	    (sqrt(n_proc) == floor(sqrt(n_proc))) ? sqrt(n_proc) : sqrt(n_proc / 2) * 2;
-	unsigned procWidth = n_proc / procHeight;
+	// unsigned procHeight =
+	//     (sqrt(n_proc) == floor(sqrt(n_proc))) ? sqrt(n_proc) : sqrt(n_proc / 2) * 2;
+	// unsigned procWidth = n_proc / procHeight;
+	const unsigned procHeight = n_proc;
+	const unsigned procWidth  = 1;
+	unsigned numNeighbors     = rank % (n_proc - 1) == 0 ? 1 : 2;
 
 	//
 	//  allocate generic resources
@@ -61,10 +101,11 @@ int main(int argc, char **argv) {
 	FILE *fsave = savename && rank == 0 ? fopen(savename, "w") : NULL;
 	FILE *fsum  = sumname && rank == 0 ? fopen(sumname, "a") : NULL;
 
-	particle_t *particles = (particle_t *) malloc(n * sizeof(particle_t));
+	particle_t *particles  = (particle_t *) malloc(n * sizeof(particle_t));
+	PackedParticle *packed = new PackedParticle[n];
 
 	MPI_Datatype PARTICLE;
-	MPI_Type_contiguous(6, MPI_DOUBLE, &PARTICLE);
+	MPI_Type_contiguous(4, MPI_DOUBLE, &PARTICLE);
 	MPI_Type_commit(&PARTICLE);
 
 	//
@@ -73,9 +114,79 @@ int main(int argc, char **argv) {
 	set_size(n);
 
 	double procSize = size / n_proc;
-	if (rank == 0) init_particles(n, particles);
-	MPI_Scatterv(particles, partition_sizes, partition_offsets, PARTICLE, local, nlocal, PARTICLE,
-	             0, MPI_COMM_WORLD);
+	if (rank == 0) {
+		init_particles(n, particles);
+		for (unsigned i = 0; i < n; i++) { packed[i] = PackedParticle(particles[i]); }
+	}
+
+	delete[] particles;
+	MPI_Scatter(packed, n, PARTICLE, MPI_IN_PLACE, n, PARTICLE, 0, MPI_COMM_WORLD);
+
+	std::list<std::pair<particle_t, ExtraParticleInfo>> localParticles;
+	struct {
+		unsigned x, y;
+	} numGrids;  // # of grids on this processor
+	numGrids.x = size / procWidth / cutoff;
+	numGrids.y = size / procHeight / cutoff;
+	struct {
+		unsigned x, y;
+	} gridSize;  // size of each grid
+	gridSize.x                       = size / procWidth / numGrids.x;
+	gridSize.y                       = size / procHeight / numGrids.y;
+	std::list<particle_t *> *buckets = new std::list<particle_t *>[numGrids.x * (numGrids.y + 2)];
+	// omp_lock_t *locks                = new omp_lock_t[numGrids.x * numGrids.y];
+
+	unsigned bufferSize           = numNeighbors * numGrids.x * NUM_PARTICLES_PER_BUCKET;
+	PackedParticle *sendBuffer    = new PackedParticle[bufferSize];
+	PackedParticle *receiveBuffer = new PackedParticle[bufferSize];
+
+	unsigned *sendSize    = new unsigned[numNeighbors];
+	MPI_Request *requests = new MPI_Request[numNeighbors];
+
+	for (unsigned i = 0; i < numNeighbors; i++) { sendSize[i] = 0; }
+
+	for (unsigned i = 0; i < n; i++) {
+		if (packed[i].position.x / gridSize.x < (rank % procWidth) * numGrids.x ||
+		    packed[i].position.x / gridSize.x >= ((rank % procWidth) + 1) * numGrids.x ||
+		    packed[i].position.y / gridSize.y < (rank / procWidth) * numGrids.y ||
+		    packed[i].position.y / gridSize.y >= ((rank / procWidth) + 1) * numGrids.y) {
+			continue;
+		}
+
+		localParticles.push_back(std::make_pair(
+		    packed[i],
+		    ExtraParticleInfo(
+		        packed[i].position.x / gridSize.x - (rank % procWidth) * numGrids.x,
+		        packed[i].position.y / gridSize.y - (rank / procWidth) * numGrids.y + 1)));
+
+		buckets[localParticles.back().second.bin.i +
+		        localParticles.back().second.bin.j * numGrids.x]
+		    .push_back(&localParticles.back().first);
+	}
+
+	delete[] packed;
+
+	// Upper neighbor
+	if (rank / procWidth > 0) {
+		for (unsigned i = 0; i < numGrids.x; i++) {
+			for (particle_t *p : buckets[i]) {
+				sendBuffer[sendSize[0]] = *p;
+				++sendSize[0];
+			}
+		}
+	}
+
+	// Lower neighbor
+	if (rank / procWidth < (procHeight - 1)) {
+		for (unsigned i = 0; i < numGrids.x; i++) {
+			for (particle_t *p : buckets[i + numGrids.x * (numGrids.y - 1)]) {
+				unsigned index = sendSize[numNeighbors - 1] +
+				                 (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
+				sendBuffer[index] = *p;
+				++sendSize[numNeighbors - 1];
+			}
+		}
+	}
 
 	//
 	//  simulate a number of time steps
@@ -88,8 +199,18 @@ int main(int argc, char **argv) {
 		//
 		//  collect all global data locally (not good idea to do)
 		//
-		MPI_Allgatherv(local, nlocal, PARTICLE, particles, partition_sizes, partition_offsets,
-		               PARTICLE, MPI_COMM_WORLD);
+		// Upper Neighbor
+		if (rank / procWidth > 0) {
+			MPI_Isend(sendBuffer, sendSize[0], PARTICLE, rank - procWidth, 0, MPI_COMM_WORLD,
+			          requests);
+		}
+
+		// Lower neighbor
+		if (rank / procWidth < (procHeight - 1)) {
+			unsigned index = (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
+			MPI_Isend(sendBuffer + index, sendSize[numNeighbors - 1], PARTICLE, rank + procWidth, 0,
+			          MPI_COMM_WORLD, requests + (numNeighbors - 1));
+		}
 
 		//
 		//  save current step if necessary (slightly different semantics than in other codes)
@@ -100,10 +221,10 @@ int main(int argc, char **argv) {
 		//
 		//  compute all forces
 		//
-		for (int i = 0; i < nlocal; i++) {
-			local[i].ax = local[i].ay = 0;
-			for (int j = 0; j < n; j++) apply_force(local[i], particles[j], &dmin, &davg, &navg);
-		}
+		// for (int i = 0; i < nlocal; i++) {
+		// 	local[i].ax = local[i].ay = 0;
+		// 	for (int j = 0; j < n; j++) apply_force(local[i], particles[j], &dmin, &davg, &navg);
+		// }
 
 		if (find_option(argc, argv, "-no") == -1) {
 			MPI_Reduce(&davg, &rdavg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -125,7 +246,7 @@ int main(int argc, char **argv) {
 		//
 		//  move particles
 		//
-		for (int i = 0; i < nlocal; i++) move(local[i]);
+		// for (int i = 0; i < nlocal; i++) move(local[i]);
 	}
 	simulation_time = read_timer() - simulation_time;
 
@@ -165,11 +286,14 @@ int main(int argc, char **argv) {
 	//  release resources
 	//
 	if (fsum) fclose(fsum);
-	free(partition_offsets);
-	free(partition_sizes);
-	free(local);
 	free(particles);
 	if (fsave) fclose(fsave);
+
+	delete[] buckets;
+	delete[] sendBuffer;
+	delete[] receiveBuffer;
+	delete[] sendSize;
+	delete[] requests;
 
 	MPI_Finalize();
 
