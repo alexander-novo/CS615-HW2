@@ -288,7 +288,6 @@ int main(int argc, char **argv) {
 	//  release resources
 	//
 	if (fsum) fclose(fsum);
-	free(particles);
 	if (fsave) fclose(fsave);
 
 	delete[] buckets;
