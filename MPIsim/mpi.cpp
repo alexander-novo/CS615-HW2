@@ -93,7 +93,8 @@ int main(int argc, char **argv) {
 	// unsigned procWidth = n_proc / procHeight;
 	const unsigned procHeight = n_proc;
 	const unsigned procWidth  = 1;
-	unsigned numNeighbors     = rank % (n_proc - 1) == 0 ? 1 : 2;
+	// unsigned numNeighbors     = rank % (n_proc - 1) == 0) ? 1 : 2;
+	const unsigned numNeighbors = 2;
 
 	//
 	//  allocate generic resources
@@ -180,9 +181,9 @@ int main(int argc, char **argv) {
 	if (rank / procWidth < (procHeight - 1)) {
 		for (unsigned i = 0; i < numGrids.x; i++) {
 			for (particle_t *p : buckets[i + numGrids.x * (numGrids.y - 1)]) {
-				unsigned index = sendSize[numNeighbors - 1] +
-				                 (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
-				sendBuffer[index] = *p;
+				// unsigned index = sendSize[numNeighbors - 1] +
+				//                  (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
+				sendBuffer[sendSize[1]] = *p;
 				++sendSize[numNeighbors - 1];
 			}
 		}
@@ -207,9 +208,10 @@ int main(int argc, char **argv) {
 
 		// Lower neighbor
 		if (rank / procWidth < (procHeight - 1)) {
-			unsigned index = (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
-			MPI_Isend(sendBuffer + index, sendSize[numNeighbors - 1], PARTICLE, rank + procWidth, 0,
-			          MPI_COMM_WORLD, requests + (numNeighbors - 1));
+			// unsigned index = (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
+			unsigned index = numGrids.x * NUM_PARTICLES_PER_BUCKET;
+			MPI_Isend(sendBuffer + index, sendSize[1], PARTICLE, rank + procWidth, 0,
+			          MPI_COMM_WORLD, requests + 1);
 		}
 
 		//
