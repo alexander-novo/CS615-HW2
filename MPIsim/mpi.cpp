@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
 	}
 
 	delete[] particles;
-	MPI_Scatter(packed, n, PARTICLE, MPI_IN_PLACE, n, PARTICLE, 0, MPI_COMM_WORLD);
+	MPI_Bcast(packed, n, PARTICLE, 0, MPI_COMM_WORLD);
 
 	std::list<std::pair<particle_t, ExtraParticleInfo>> localParticles;
 	struct {
