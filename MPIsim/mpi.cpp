@@ -53,28 +53,36 @@ struct PackedParticle {
 	}
 };
 
+template <typename T>
 struct Dimensions {
-	unsigned x, y;
+	T x, y;
 };
 
 void putParticleIntoAppropriateList(
     const PackedParticle &p, std::list<std::pair<particle_t, ExtraParticleInfo>> &localParticles,
     std::vector<std::pair<particle_t, ExtraParticleInfo>> &localGhosts,
-    std::list<particle_t *> *buckets, Dimensions gridSize, Dimensions numGrids, unsigned rank) {
+    std::list<particle_t *> *buckets, Dimensions<double> gridSize, Dimensions<unsigned> numGrids,
+    unsigned rank) {
 	// Now sift out ghost region particles
 	if (p.position.y / gridSize.y < rank * numGrids.y ||
 	    p.position.y / gridSize.y >= (rank + 1) * numGrids.y) {
-		localGhosts.push_back(std::make_pair(
-		    p, ExtraParticleInfo(p.position.x / gridSize.x,
-		                         p.position.y / gridSize.y - rank * numGrids.y + 1)));
+		printf("particle position <%f,%f> ", p.position.x, p.position.y);
+		localGhosts.push_back(
+		    std::make_pair(p, ExtraParticleInfo(p.position.y / gridSize.y - rank * numGrids.y + 1,
+		                                        p.position.x / gridSize.x)));
 
+		printf("global bin <%d,%d> rank %d ", static_cast<unsigned>(p.position.y / gridSize.y),
+		       static_cast<unsigned>(p.position.x / gridSize.x), rank);
+		printf("bin <%d,%d> with grids <%d,%d>", localGhosts.back().second.bin.i,
+		       localGhosts.back().second.bin.j, numGrids.x, numGrids.y);
+		std::cout << std::endl;
 		buckets[localGhosts.back().second.bin.j + localGhosts.back().second.bin.i * numGrids.x]
 		    .push_back(&localGhosts.back().first);
 	} else {
 		// Add all particles which actually belong to us to our master list
-		localParticles.push_back(std::make_pair(
-		    p, ExtraParticleInfo(p.position.x / gridSize.x,
-		                         p.position.y / gridSize.y - rank * numGrids.y + 1)));
+		localParticles.push_back(
+		    std::make_pair(p, ExtraParticleInfo(p.position.y / gridSize.y - rank * numGrids.y + 1,
+		                                        p.position.x / gridSize.x)));
 
 		buckets[localParticles.back().second.bin.j +
 		        localParticles.back().second.bin.i * numGrids.x]
@@ -116,6 +124,9 @@ int main(int argc, char **argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+	std::cout << "My rank is " << rank << std::endl;
+	std::cout << "Packed Particle Size is " << sizeof(PackedParticle) << std::endl;
+
 	//
 	//  allocate generic resources
 	//
@@ -137,17 +148,28 @@ int main(int argc, char **argv) {
 	double procSize = size / n_proc;
 	if (rank == 0) {
 		init_particles(n, particles);
-		for (unsigned i = 0; i < n; i++) { packed[i] = PackedParticle(particles[i]); }
+		for (unsigned i = 0; i < n; i++) {
+			packed[i] = PackedParticle(particles[i]);
+			// printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
+		}
 	}
 
-	delete[] particles;
+	free(particles);
 	MPI_Bcast(packed, n, PARTICLE, 0, MPI_COMM_WORLD);
+
+	if (rank == 1) {
+		printf("\n\n After Broadcast \n\n");
+		for (unsigned i = 0; i < n; i++) {
+			packed[i] = PackedParticle(particles[i]);
+			// printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
+		}
+	}
 
 	std::list<std::pair<particle_t, ExtraParticleInfo>> localParticles;
 	std::vector<std::pair<particle_t, ExtraParticleInfo>> localGhosts;
 
-	Dimensions numGrids;  // # of grids on this processor
-	Dimensions gridSize;  // size of each grid
+	Dimensions<unsigned> numGrids;  // # of grids on this processor
+	Dimensions<double> gridSize;    // size of each grid
 	numGrids.x                       = size / cutoff;
 	numGrids.y                       = size / n_proc / cutoff;
 	gridSize.x                       = size / numGrids.x;
@@ -161,6 +183,8 @@ int main(int argc, char **argv) {
 
 	localGhosts.reserve(bufferSize * 2);
 
+	std::cout << "size: " << size << std::endl;
+
 	unsigned sendSize[2];
 	MPI_Request requests[4];
 	MPI_Status statuses[4];
@@ -170,8 +194,8 @@ int main(int argc, char **argv) {
 	for (unsigned i = 0; i < n; i++) {
 		// Discard any particles which don't belong to our process (or our ghost region)
 		// +/- 1 to account for ghost regions
-		if (packed[i].position.y / gridSize.y < rank * numGrids.y - 1 ||
-		    packed[i].position.y / gridSize.y >= (rank + 1) * numGrids.y + 1) {
+		if (packed[i].position.y / gridSize.y + 1 < rank * numGrids.y ||
+		    packed[i].position.y / gridSize.y - 1 >= (rank + 1) * numGrids.y) {
 			continue;
 		}
 
@@ -209,6 +233,7 @@ int main(int argc, char **argv) {
 
 				for (particle_t *p1 : bucket) {
 					p1->ax = p1->ay = 0;
+
 					// Loop through all neighboring buckets
 					for (unsigned i2 = i - 1; i2 <= i + 1; i2++) {
 						for (unsigned j2 = max(j, 1) - 1; j2 < j + 2 && j2 < numGrids.x; j2++) {
@@ -247,8 +272,8 @@ int main(int argc, char **argv) {
 			particle_t &p            = i->first;
 			ExtraParticleInfo &extra = i->second;
 			move(p);
-			unsigned newBinIGlobal = p.x / gridSize.x;
-			unsigned newBinJGlobal = p.y / gridSize.y;
+			unsigned newBinIGlobal = p.y / gridSize.y;
+			unsigned newBinJGlobal = p.x / gridSize.x;
 
 			// If the particle has moved off the process, remove from master list and bin and add to
 			// send buffer
@@ -268,8 +293,8 @@ int main(int argc, char **argv) {
 				i = localParticles.erase(i);
 			} else {
 				// Otherwise, we belong to a valid bin, so calculate that
-				unsigned newBinI = newBinIGlobal - rank * numGrids.y;
-				unsigned newBinJ = newBinJGlobal - (rank + 1) * numGrids.y + 1;
+				unsigned newBinI = newBinIGlobal - rank * numGrids.y + 1;
+				unsigned newBinJ = newBinJGlobal;
 
 				// Now, move to a new bin if neccesary
 				if (newBinI != extra.bin.i || newBinJ != extra.bin.j) {
@@ -315,7 +340,7 @@ int main(int argc, char **argv) {
 			buckets[j + (numGrids.y + 1) * numGrids.x].clear();
 		}
 
-		MPI_Waitall(numRequests, requests + (rank > 0 ? 2 : 0), statuses);
+		MPI_Waitall(numRequests, requests + (rank > 0 ? 0 : 2), statuses);
 
 		int numReceived;
 
