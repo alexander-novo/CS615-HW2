@@ -10,7 +10,7 @@
 
 extern double size;
 #define cutoff 0.01
-#define NUM_PARTICLES_PER_BUCKET 1.0
+#define NUM_PARTICLES_PER_BUCKET 4.0
 
 struct ExtraParticleInfo {
 	struct {
@@ -65,22 +65,11 @@ void putParticleIntoAppropriateList(
     std::list<particle_t *> *buckets, Dimensions<double> gridSize, Dimensions<unsigned> numGrids,
     unsigned rank) {
 	// Now sift out ghost region particles
-	if (rank == 0) {
-		printf("particle position <%f,%f>", p.position.x, p.position.y);
-		std::cout << std::endl;
-	}
 	if (p.position.y / gridSize.y < rank * numGrids.y ||
 	    p.position.y / gridSize.y >= (rank + 1) * numGrids.y) {
-		printf("particle position <%f,%f> ", p.position.x, p.position.y);
 		localGhosts.push_back(
 		    std::make_pair(p, ExtraParticleInfo(p.position.y / gridSize.y - rank * numGrids.y + 1,
 		                                        p.position.x / gridSize.x)));
-
-		printf("global bin <%d,%d> rank %d ", static_cast<unsigned>(p.position.y / gridSize.y),
-		       static_cast<unsigned>(p.position.x / gridSize.x), rank);
-		printf("bin <%d,%d> with grids <%d,%d>", localGhosts.back().second.bin.i,
-		       localGhosts.back().second.bin.j, numGrids.x, numGrids.y);
-		std::cout << std::endl;
 		buckets[localGhosts.back().second.bin.j + localGhosts.back().second.bin.i * numGrids.x]
 		    .push_back(&localGhosts.back().first);
 	} else {
@@ -129,9 +118,6 @@ int main(int argc, char **argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-	std::cout << "My rank is " << rank << std::endl;
-	std::cout << "Packed Particle Size is " << sizeof(PackedParticle) << std::endl;
-
 	//
 	//  allocate generic resources
 	//
@@ -153,10 +139,7 @@ int main(int argc, char **argv) {
 	double procSize = size / n_proc;
 	if (rank == 0) {
 		init_particles(n, particles);
-		for (unsigned i = 0; i < n; i++) {
-			packed[i] = PackedParticle(particles[i]);
-			// printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
-		}
+		for (unsigned i = 0; i < n; i++) { packed[i] = PackedParticle(particles[i]); }
 	}
 
 	free(particles);
@@ -180,8 +163,6 @@ int main(int argc, char **argv) {
 
 	localGhosts.reserve(bufferSize * 2);
 
-	std::cout << "size: " << size << std::endl;
-
 	unsigned sendSize[2];
 	MPI_Request requests[4];
 	MPI_Status statuses[4];
@@ -196,7 +177,6 @@ int main(int argc, char **argv) {
 			continue;
 		}
 
-		printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
 		putParticleIntoAppropriateList(packed[i], localParticles, localGhosts, buckets, gridSize,
 		                               numGrids, rank);
 	}
@@ -211,9 +191,6 @@ int main(int argc, char **argv) {
 		navg = 0;
 		dmin = 1.0;
 		davg = 0.0;
-		//
-		//  collect all global data locally (not good idea to do)
-		//
 
 		//
 		//  save current step if necessary (slightly different semantics than in other codes)
@@ -304,6 +281,14 @@ int main(int argc, char **argv) {
 					buckets[extra.bin.j + extra.bin.i * numGrids.x].push_back(&p);
 				}
 
+				if (newBinI == 1) {
+					sendBuffer[sendSize[0]] = p;
+					++sendSize[0];
+				} else if (newBinI == numGrids.y) {
+					sendBuffer[bufferSize + sendSize[1]] = p;
+					++sendSize[1];
+				}
+
 				++i;
 			}
 		}
@@ -354,7 +339,7 @@ int main(int argc, char **argv) {
 
 		// Receive ghost particles from our lower neighbor
 		if (rank < n_proc - 1) {
-			MPI_Get_count(statuses + 3, PARTICLE, &numReceived);
+			MPI_Get_count(statuses + 1 + ((rank > 0) ? 2 : 0), PARTICLE, &numReceived);
 
 			for (unsigned i = 0; i < numReceived; i++) {
 				putParticleIntoAppropriateList(receiveBuffer[i + bufferSize], localParticles,
