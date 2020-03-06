@@ -10,11 +10,11 @@ SHELL='bash'
 CC = g++
 MPCC = mpic++
 #OPENMP = -fopenmp
-CFLAGS = -O3 -std=c++11
+CFLAGS = -O3 -std=c++11 -g
 LIBS =
 
 
-TARGETS = mpi serial autograder #  pthreads openmp 
+TARGETS = mpi serial autograder #  pthreads openmp
 
 all:	$(TARGETS)
 

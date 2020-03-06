@@ -3,6 +3,7 @@
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <iostream>
 #include <list>
 #include <vector>
 #include "common.h"
@@ -64,6 +65,10 @@ void putParticleIntoAppropriateList(
     std::list<particle_t *> *buckets, Dimensions<double> gridSize, Dimensions<unsigned> numGrids,
     unsigned rank) {
 	// Now sift out ghost region particles
+	if (rank == 0) {
+		printf("particle position <%f,%f>", p.position.x, p.position.y);
+		std::cout << std::endl;
+	}
 	if (p.position.y / gridSize.y < rank * numGrids.y ||
 	    p.position.y / gridSize.y >= (rank + 1) * numGrids.y) {
 		printf("particle position <%f,%f> ", p.position.x, p.position.y);
@@ -157,14 +162,6 @@ int main(int argc, char **argv) {
 	free(particles);
 	MPI_Bcast(packed, n, PARTICLE, 0, MPI_COMM_WORLD);
 
-	if (rank == 1) {
-		printf("\n\n After Broadcast \n\n");
-		for (unsigned i = 0; i < n; i++) {
-			packed[i] = PackedParticle(particles[i]);
-			// printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
-		}
-	}
-
 	std::list<std::pair<particle_t, ExtraParticleInfo>> localParticles;
 	std::vector<std::pair<particle_t, ExtraParticleInfo>> localGhosts;
 
@@ -199,6 +196,7 @@ int main(int argc, char **argv) {
 			continue;
 		}
 
+		printf("<%f,%f>\n", packed[i].position.x, packed[i].position.y);
 		putParticleIntoAppropriateList(packed[i], localParticles, localGhosts, buckets, gridSize,
 		                               numGrids, rank);
 	}
