@@ -4,13 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <list>
+#include <vector>
 #include "common.h"
 
 extern double size;
 #define cutoff 0.01
 #define NUM_PARTICLES_PER_BUCKET 1.0
-
-typedef std::list<particle_t *> container;
 
 struct ExtraParticleInfo {
 	struct {
@@ -54,6 +53,35 @@ struct PackedParticle {
 	}
 };
 
+struct Dimensions {
+	unsigned x, y;
+};
+
+void putParticleIntoAppropriateList(
+    const PackedParticle &p, std::list<std::pair<particle_t, ExtraParticleInfo>> &localParticles,
+    std::vector<std::pair<particle_t, ExtraParticleInfo>> &localGhosts,
+    std::list<particle_t *> *buckets, Dimensions gridSize, Dimensions numGrids, unsigned rank) {
+	// Now sift out ghost region particles
+	if (p.position.y / gridSize.y < rank * numGrids.y ||
+	    p.position.y / gridSize.y >= (rank + 1) * numGrids.y) {
+		localGhosts.push_back(std::make_pair(
+		    p, ExtraParticleInfo(p.position.x / gridSize.x,
+		                         p.position.y / gridSize.y - rank * numGrids.y + 1)));
+
+		buckets[localGhosts.back().second.bin.j + localGhosts.back().second.bin.i * numGrids.x]
+		    .push_back(&localGhosts.back().first);
+	} else {
+		// Add all particles which actually belong to us to our master list
+		localParticles.push_back(std::make_pair(
+		    p, ExtraParticleInfo(p.position.x / gridSize.x,
+		                         p.position.y / gridSize.y - rank * numGrids.y + 1)));
+
+		buckets[localParticles.back().second.bin.j +
+		        localParticles.back().second.bin.i * numGrids.x]
+		    .push_back(&localParticles.back().first);
+	}
+}
+
 //
 //  benchmarking program
 //
@@ -88,14 +116,6 @@ int main(int argc, char **argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-	// unsigned procHeight =
-	//     (sqrt(n_proc) == floor(sqrt(n_proc))) ? sqrt(n_proc) : sqrt(n_proc / 2) * 2;
-	// unsigned procWidth = n_proc / procHeight;
-	const unsigned procHeight = n_proc;
-	const unsigned procWidth  = 1;
-	// unsigned numNeighbors     = rank % (n_proc - 1) == 0) ? 1 : 2;
-	const unsigned numNeighbors = 2;
-
 	//
 	//  allocate generic resources
 	//
@@ -124,70 +144,42 @@ int main(int argc, char **argv) {
 	MPI_Bcast(packed, n, PARTICLE, 0, MPI_COMM_WORLD);
 
 	std::list<std::pair<particle_t, ExtraParticleInfo>> localParticles;
-	struct {
-		unsigned x, y;
-	} numGrids;  // # of grids on this processor
-	numGrids.x = size / procWidth / cutoff;
-	numGrids.y = size / procHeight / cutoff;
-	struct {
-		unsigned x, y;
-	} gridSize;  // size of each grid
-	gridSize.x                       = size / procWidth / numGrids.x;
-	gridSize.y                       = size / procHeight / numGrids.y;
+	std::vector<std::pair<particle_t, ExtraParticleInfo>> localGhosts;
+
+	Dimensions numGrids;  // # of grids on this processor
+	Dimensions gridSize;  // size of each grid
+	numGrids.x                       = size / cutoff;
+	numGrids.y                       = size / n_proc / cutoff;
+	gridSize.x                       = size / numGrids.x;
+	gridSize.y                       = size / n_proc / numGrids.y;
 	std::list<particle_t *> *buckets = new std::list<particle_t *>[numGrids.x * (numGrids.y + 2)];
 	// omp_lock_t *locks                = new omp_lock_t[numGrids.x * numGrids.y];
 
-	unsigned bufferSize           = numNeighbors * numGrids.x * NUM_PARTICLES_PER_BUCKET;
-	PackedParticle *sendBuffer    = new PackedParticle[bufferSize];
-	PackedParticle *receiveBuffer = new PackedParticle[bufferSize];
+	unsigned bufferSize           = numGrids.x * NUM_PARTICLES_PER_BUCKET;
+	PackedParticle *sendBuffer    = new PackedParticle[2 * bufferSize];
+	PackedParticle *receiveBuffer = new PackedParticle[2 * bufferSize];
 
-	unsigned *sendSize    = new unsigned[numNeighbors];
-	MPI_Request *requests = new MPI_Request[numNeighbors];
+	localGhosts.reserve(bufferSize * 2);
 
-	for (unsigned i = 0; i < numNeighbors; i++) { sendSize[i] = 0; }
+	unsigned sendSize[2];
+	MPI_Request requests[4];
+	MPI_Status statuses[4];
+
+	for (unsigned i = 0; i < 2; i++) { sendSize[i] = 0; }
 
 	for (unsigned i = 0; i < n; i++) {
-		if (packed[i].position.x / gridSize.x < (rank % procWidth) * numGrids.x ||
-		    packed[i].position.x / gridSize.x >= ((rank % procWidth) + 1) * numGrids.x ||
-		    packed[i].position.y / gridSize.y < (rank / procWidth) * numGrids.y ||
-		    packed[i].position.y / gridSize.y >= ((rank / procWidth) + 1) * numGrids.y) {
+		// Discard any particles which don't belong to our process (or our ghost region)
+		// +/- 1 to account for ghost regions
+		if (packed[i].position.y / gridSize.y < rank * numGrids.y - 1 ||
+		    packed[i].position.y / gridSize.y >= (rank + 1) * numGrids.y + 1) {
 			continue;
 		}
 
-		localParticles.push_back(std::make_pair(
-		    packed[i],
-		    ExtraParticleInfo(
-		        packed[i].position.x / gridSize.x - (rank % procWidth) * numGrids.x,
-		        packed[i].position.y / gridSize.y - (rank / procWidth) * numGrids.y + 1)));
-
-		buckets[localParticles.back().second.bin.i +
-		        localParticles.back().second.bin.j * numGrids.x]
-		    .push_back(&localParticles.back().first);
+		putParticleIntoAppropriateList(packed[i], localParticles, localGhosts, buckets, gridSize,
+		                               numGrids, rank);
 	}
 
 	delete[] packed;
-
-	// Upper neighbor
-	if (rank / procWidth > 0) {
-		for (unsigned i = 0; i < numGrids.x; i++) {
-			for (particle_t *p : buckets[i]) {
-				sendBuffer[sendSize[0]] = *p;
-				++sendSize[0];
-			}
-		}
-	}
-
-	// Lower neighbor
-	if (rank / procWidth < (procHeight - 1)) {
-		for (unsigned i = 0; i < numGrids.x; i++) {
-			for (particle_t *p : buckets[i + numGrids.x * (numGrids.y - 1)]) {
-				// unsigned index = sendSize[numNeighbors - 1] +
-				//                  (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
-				sendBuffer[sendSize[1]] = *p;
-				++sendSize[numNeighbors - 1];
-			}
-		}
-	}
 
 	//
 	//  simulate a number of time steps
@@ -200,19 +192,6 @@ int main(int argc, char **argv) {
 		//
 		//  collect all global data locally (not good idea to do)
 		//
-		// Upper Neighbor
-		if (rank / procWidth > 0) {
-			MPI_Isend(sendBuffer, sendSize[0], PARTICLE, rank - procWidth, 0, MPI_COMM_WORLD,
-			          requests);
-		}
-
-		// Lower neighbor
-		if (rank / procWidth < (procHeight - 1)) {
-			// unsigned index = (numNeighbors - 1) * numGrids.x * NUM_PARTICLES_PER_BUCKET;
-			unsigned index = numGrids.x * NUM_PARTICLES_PER_BUCKET;
-			MPI_Isend(sendBuffer + index, sendSize[1], PARTICLE, rank + procWidth, 0,
-			          MPI_COMM_WORLD, requests + 1);
-		}
 
 		//
 		//  save current step if necessary (slightly different semantics than in other codes)
@@ -223,10 +202,26 @@ int main(int argc, char **argv) {
 		//
 		//  compute all forces
 		//
-		// for (int i = 0; i < nlocal; i++) {
-		// 	local[i].ax = local[i].ay = 0;
-		// 	for (int j = 0; j < n; j++) apply_force(local[i], particles[j], &dmin, &davg, &navg);
-		// }
+
+		for (unsigned i = 1; i <= numGrids.y; i++) {
+			for (unsigned j = 0; j < numGrids.x; j++) {
+				std::list<particle_t *> &bucket = buckets[j + i * numGrids.x];
+
+				for (particle_t *p1 : bucket) {
+					p1->ax = p1->ay = 0;
+					// Loop through all neighboring buckets
+					for (unsigned i2 = i - 1; i2 <= i + 1; i2++) {
+						for (unsigned j2 = max(j, 1) - 1; j2 < j + 2 && j2 < numGrids.x; j2++) {
+							std::list<particle_t *> &bucket2 = buckets[j2 + i2 * numGrids.x];
+
+							for (particle_t *p2 : bucket2) {
+								apply_force(*p1, *p2, &dmin, &davg, &navg);
+							}
+						}
+					}
+				}
+			}
+		}
 
 		if (find_option(argc, argv, "-no") == -1) {
 			MPI_Reduce(&davg, &rdavg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -248,7 +243,101 @@ int main(int argc, char **argv) {
 		//
 		//  move particles
 		//
-		// for (int i = 0; i < nlocal; i++) move(local[i]);
+		for (auto i = localParticles.begin(); i != localParticles.end();) {
+			particle_t &p            = i->first;
+			ExtraParticleInfo &extra = i->second;
+			move(p);
+			unsigned newBinIGlobal = p.x / gridSize.x;
+			unsigned newBinJGlobal = p.y / gridSize.y;
+
+			// If the particle has moved off the process, remove from master list and bin and add to
+			// send buffer
+			if (newBinIGlobal < rank * numGrids.y) {
+				buckets[extra.bin.j + extra.bin.i * numGrids.x].remove(&p);
+
+				sendBuffer[sendSize[0]] = p;
+				++sendSize[0];
+
+				i = localParticles.erase(i);
+			} else if (newBinIGlobal >= (rank + 1) * numGrids.y) {
+				buckets[extra.bin.j + extra.bin.i * numGrids.x].remove(&p);
+
+				sendBuffer[bufferSize + sendSize[1]] = p;
+				++sendSize[1];
+
+				i = localParticles.erase(i);
+			} else {
+				// Otherwise, we belong to a valid bin, so calculate that
+				unsigned newBinI = newBinIGlobal - rank * numGrids.y;
+				unsigned newBinJ = newBinJGlobal - (rank + 1) * numGrids.y + 1;
+
+				// Now, move to a new bin if neccesary
+				if (newBinI != extra.bin.i || newBinJ != extra.bin.j) {
+					buckets[extra.bin.j + extra.bin.i * numGrids.x].remove(&p);
+
+					extra.bin.i = newBinI;
+					extra.bin.j = newBinJ;
+
+					buckets[extra.bin.j + extra.bin.i * numGrids.x].push_back(&p);
+				}
+
+				++i;
+			}
+		}
+
+		unsigned numRequests = 0;
+		// Upper Neighbor
+		if (rank > 0) {
+			MPI_Isend(sendBuffer, sendSize[0], PARTICLE, rank - 1, 0, MPI_COMM_WORLD, requests);
+			MPI_Irecv(receiveBuffer, bufferSize, PARTICLE, rank - 1, 0, MPI_COMM_WORLD,
+			          requests + 1);
+
+			numRequests += 2;
+		}
+
+		// Lower neighbor
+		if (rank < (n_proc - 1)) {
+			MPI_Isend(sendBuffer + bufferSize, sendSize[1], PARTICLE, rank + 1, 0, MPI_COMM_WORLD,
+			          requests + 2);
+			MPI_Irecv(receiveBuffer + bufferSize, bufferSize, PARTICLE, rank + 1, 0, MPI_COMM_WORLD,
+			          requests + 3);
+
+			numRequests += 2;
+		}
+
+		// Now that we have sent all of our stuff and are waiting to receive our stuff,
+		// clear buffers, ghost particle list, and ghost region buckets.
+		for (unsigned i = 0; i < 2; i++) { sendSize[i] = 0; }
+		localGhosts.clear();
+
+		for (unsigned j = 0; j < numGrids.x; j++) {
+			buckets[j].clear();
+			buckets[j + (numGrids.y + 1) * numGrids.x].clear();
+		}
+
+		MPI_Waitall(numRequests, requests + (rank > 0 ? 2 : 0), statuses);
+
+		int numReceived;
+
+		// Receive ghost particles from our upper neighbor
+		if (rank > 0) {
+			MPI_Get_count(statuses + 1, PARTICLE, &numReceived);
+
+			for (unsigned i = 0; i < numReceived; i++) {
+				putParticleIntoAppropriateList(receiveBuffer[i], localParticles, localGhosts,
+				                               buckets, gridSize, numGrids, rank);
+			}
+		}
+
+		// Receive ghost particles from our lower neighbor
+		if (rank < n_proc - 1) {
+			MPI_Get_count(statuses + 3, PARTICLE, &numReceived);
+
+			for (unsigned i = 0; i < numReceived; i++) {
+				putParticleIntoAppropriateList(receiveBuffer[i + bufferSize], localParticles,
+				                               localGhosts, buckets, gridSize, numGrids, rank);
+			}
+		}
 	}
 	simulation_time = read_timer() - simulation_time;
 
@@ -258,13 +347,14 @@ int main(int argc, char **argv) {
 		if (find_option(argc, argv, "-no") == -1) {
 			if (nabsavg) absavg /= nabsavg;
 			//
-			//  -the minimum distance absmin between 2 particles during the run of the simulation
-			//  -A Correct simulation will have particles stay at greater than 0.4 (of cutoff) with
-			//  typical values between .7-.8 -A simulation were particles don't interact correctly
-			//  will be less than 0.4 (of cutoff) with typical values between .01-.05
+			//  -the minimum distance absmin between 2 particles during the run of the
+			//  simulation -A Correct simulation will have particles stay at greater than 0.4
+			//  (of cutoff) with typical values between .7-.8 -A simulation were particles don't
+			//  interact correctly will be less than 0.4 (of cutoff) with typical values between
+			//  .01-.05
 			//
-			//  -The average distance absavg is ~.95 when most particles are interacting correctly
-			//  and ~.66 when no particles are interacting
+			//  -The average distance absavg is ~.95 when most particles are interacting
+			//  correctly and ~.66 when no particles are interacting
 			//
 			printf(", absmin = %lf, absavg = %lf", absmin, absavg);
 			if (absmin < 0.4)
@@ -293,8 +383,6 @@ int main(int argc, char **argv) {
 	delete[] buckets;
 	delete[] sendBuffer;
 	delete[] receiveBuffer;
-	delete[] sendSize;
-	delete[] requests;
 
 	MPI_Finalize();
 
